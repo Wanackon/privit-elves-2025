@@ -82,67 +82,81 @@ class ChristmasTree:
         )
 
 
-def generate_weighted_angle():
+def check_collision(poly1, poly2):
     """
-    Generates a random angle with a distribution weighted by abs(sin(2*angle)).
-    This helps place more trees in corners, and makes the packing less round.
+    Check if two polygons overlap (not just touch).
+    Returns True if there's an overlap, False otherwise.
+    
+    Uses the same proven logic as the baseline greedy approach.
     """
-    while True:
-        angle = random.uniform(0, 2 * math.pi)
-        if random.uniform(0, 1) < abs(math.sin(2 * angle)):
-            return angle
+    return poly1.intersects(poly2) and not poly1.touches(poly2)
 
 
-def generate_candidate_positions(tree_to_place, placed_trees, num_positions=200):
+def compute_bounding_box_with_new_tree(placed_trees, new_tree_poly):
     """
-    Generate candidate positions for tree placement using sliding approach.
-    
-    This samples ~num_positions angles and slides the tree from far away toward
-    the center until collision, then backs up to find valid contact positions.
-    
-    Returns a list of (x, y) positions in unscaled Decimal coordinates.
+    Compute the bounding box side length if we add a new tree polygon.
+    Returns the max side length of the bounding box.
     """
     if not placed_trees:
-        return [(Decimal('0'), Decimal('0'))]
+        bounds = new_tree_poly.bounds
+    else:
+        all_polys = [t.polygon for t in placed_trees] + [new_tree_poly]
+        bounds = unary_union(all_polys).bounds
+    
+    minx = Decimal(bounds[0]) / scale_factor
+    miny = Decimal(bounds[1]) / scale_factor
+    maxx = Decimal(bounds[2]) / scale_factor
+    maxy = Decimal(bounds[3]) / scale_factor
+    
+    width = maxx - minx
+    height = maxy - miny
+    return max(width, height)
+
+
+def find_best_rotation_and_position(placed_trees, num_rotation_angles=24, num_direction_angles=48):
+    """
+    Try multiple rotation angles for the new tree and find the best 
+    (rotation, position) combination that minimizes the bounding box.
+    
+    Returns (best_x, best_y, best_angle) in unscaled Decimal coordinates.
+    """
+    if not placed_trees:
+        return Decimal('0'), Decimal('0'), Decimal('0')
     
     placed_polygons = [t.polygon for t in placed_trees]
     tree_index = STRtree(placed_polygons)
     
-    candidate_positions = []
+    best_score = Decimal('Infinity')
+    best_result = (Decimal('0'), Decimal('0'), Decimal('0'))
     
-    # Generate angles: mix of uniform sampling and weighted angles for corners
-    num_uniform = num_positions // 2
-    num_weighted = num_positions - num_uniform
+    # Try different rotation angles
+    # Focus on angles that help interlocking: 0, 30, 60, 90, 120, 150, 180, etc.
+    rotation_angles = [i * 360 / num_rotation_angles for i in range(num_rotation_angles)]
     
-    angles = []
-    # Uniform angles
-    for i in range(num_uniform):
-        angles.append(2 * math.pi * i / num_uniform)
-    # Weighted angles (prefer corners)
-    for _ in range(num_weighted):
-        angles.append(generate_weighted_angle())
-    
-    for angle in angles:
-        vx = Decimal(str(math.cos(angle)))
-        vy = Decimal(str(math.sin(angle)))
+    for rot_angle in rotation_angles:
+        # Create template tree with this rotation at origin
+        template_tree = ChristmasTree(angle=str(rot_angle))
         
-        # Start far away and move toward center
-        radius = Decimal('20.0')
-        step_in = Decimal('0.5')
+        # Generate candidate positions for this rotation
+        candidate_positions = []
+        direction_angles = [2 * math.pi * i / num_direction_angles for i in range(num_direction_angles)]
         
-        collision_found = False
-        while radius >= 0:
-            px = radius * vx
-            py = radius * vy
+        for dir_angle in direction_angles:
+            vx = Decimal(str(math.cos(dir_angle)))
+            vy = Decimal(str(math.sin(dir_angle)))
             
-            # Create candidate polygon at this position
+            # Binary search for contact position
+            low_radius = Decimal('0.0')
+            high_radius = Decimal('12.0')
+            
+            # Check if high_radius is collision-free
+            px = high_radius * vx
+            py = high_radius * vy
             candidate_poly = affinity.translate(
-                tree_to_place.polygon,
+                template_tree.polygon,
                 xoff=float(px * scale_factor),
                 yoff=float(py * scale_factor)
             )
-            
-            # Check for collision
             possible_indices = tree_index.query(candidate_poly)
             has_collision = any(
                 candidate_poly.intersects(placed_polygons[i]) and 
@@ -151,20 +165,16 @@ def generate_candidate_positions(tree_to_place, placed_trees, num_positions=200)
             )
             
             if has_collision:
-                collision_found = True
-                break
-            radius -= step_in
-        
-        # Back up until no collision
-        if collision_found:
-            step_out = Decimal('0.05')
-            for _ in range(100):  # Limit iterations
-                radius += step_out
-                px = radius * vx
-                py = radius * vy
+                continue
+            
+            # Binary search
+            for _ in range(18):
+                mid_radius = (low_radius + high_radius) / 2
+                px = mid_radius * vx
+                py = mid_radius * vy
                 
                 candidate_poly = affinity.translate(
-                    tree_to_place.polygon,
+                    template_tree.polygon,
                     xoff=float(px * scale_factor),
                     yoff=float(py * scale_factor)
                 )
@@ -176,70 +186,32 @@ def generate_candidate_positions(tree_to_place, placed_trees, num_positions=200)
                     for i in possible_indices
                 )
                 
-                if not has_collision:
-                    candidate_positions.append((px, py))
-                    break
-        else:
-            # No collision found even at center - place at center
-            candidate_positions.append((Decimal('0'), Decimal('0')))
-    
-    # Remove duplicates
-    unique_positions = []
-    seen = set()
-    for px, py in candidate_positions:
-        key = (round(float(px), 4), round(float(py), 4))
-        if key not in seen:
-            seen.add(key)
-            unique_positions.append((px, py))
-    
-    return unique_positions if unique_positions else [(Decimal('0'), Decimal('0'))]
-
-
-def check_collision(poly1, poly2):
-    """
-    Check if two polygons overlap (not just touch).
-    Returns True if there's an overlap, False otherwise.
-    
-    Uses the same proven logic as the baseline greedy approach.
-    """
-    return poly1.intersects(poly2) and not poly1.touches(poly2)
-
-
-def blf_placement_with_nfp(tree_to_place, placed_trees, num_positions=200):
-    """
-    Bottom-Left-Fill heuristic using sliding-based candidate positions.
-    Evaluates approximately num_positions positions per tree.
-    
-    All positions are in unscaled Decimal coordinates.
-    """
-    if not placed_trees:
-        return Decimal('0'), Decimal('0')
-    
-    # Generate candidate positions using sliding approach
-    candidate_positions = generate_candidate_positions(
-        tree_to_place, 
-        placed_trees, 
-        num_positions=num_positions
-    )
-    
-    best_position = None
-    best_score = Decimal('Infinity')
-    
-    # Evaluate each candidate position using BLF criteria
-    # Score = minimize distance from origin (compact packing)
-    for px, py in candidate_positions:
-        # BLF score: minimize max extent from origin for compact bounding box
-        # Using max(|x|, |y|) gives better bounding box minimization than x+y
-        score = max(abs(px), abs(py))
+                if has_collision:
+                    low_radius = mid_radius
+                else:
+                    high_radius = mid_radius
+            
+            px = high_radius * vx
+            py = high_radius * vy
+            candidate_positions.append((px, py))
         
-        if score < best_score:
-            best_score = score
-            best_position = (px, py)
+        # Evaluate each candidate position
+        for px, py in candidate_positions:
+            # Create the tree at this position
+            new_tree_poly = affinity.translate(
+                template_tree.polygon,
+                xoff=float(px * scale_factor),
+                yoff=float(py * scale_factor)
+            )
+            
+            # Score = bounding box side length
+            score = compute_bounding_box_with_new_tree(placed_trees, new_tree_poly)
+            
+            if score < best_score:
+                best_score = score
+                best_result = (px, py, Decimal(str(rot_angle)))
     
-    if best_position is None:
-        return Decimal('0'), Decimal('0')
-    
-    return best_position[0], best_position[1]
+    return best_result
 
 
 def copy_tree(tree):
@@ -334,6 +306,11 @@ def simulated_annealing_improvement(placed_trees, initial_temp=50.0, cooling_rat
     """
     Simulated Annealing improvement phase to refine the layout.
     Uses small perturbations to escape local optima and find more compact packings.
+    
+    Enhanced with:
+    - Larger rotation perturbations to find better interlocking
+    - Move toward center bias
+    - Occasional big jumps to escape local minima
     """
     if len(placed_trees) < 2:
         return placed_trees
@@ -367,24 +344,48 @@ def simulated_annealing_improvement(placed_trees, initial_temp=50.0, cooling_rat
         old_y = old_tree.center_y
         old_angle = old_tree.angle
         
-        # Generate perturbation
-        perturbation_type = random.choice(['translate', 'rotate', 'both'])
+        # Decrease perturbation magnitude as temperature cools
+        progress = iteration / iterations
+        
+        # Choose perturbation type with rotation bias
+        rand = random.random()
+        if rand < 0.3:
+            perturbation_type = 'translate'
+        elif rand < 0.6:
+            perturbation_type = 'rotate'
+        elif rand < 0.85:
+            perturbation_type = 'both'
+        else:
+            perturbation_type = 'big_rotate'  # Occasional large rotation
         
         new_x = old_x
         new_y = old_y
         new_angle = old_angle
         
-        # Decrease perturbation magnitude as temperature cools
-        progress = iteration / iterations
-        
         if perturbation_type in ['translate', 'both']:
-            max_shift = 0.3 * (1.0 - progress * 0.5)
-            new_x += Decimal(str(random.uniform(-max_shift, max_shift)))
-            new_y += Decimal(str(random.uniform(-max_shift, max_shift)))
+            max_shift = 0.25 * (1.0 - progress * 0.6)
+            # Bias toward center
+            if random.random() < 0.4:
+                # Move slightly toward center
+                dist_from_center = (old_x**2 + old_y**2).sqrt()
+                if dist_from_center > Decimal('0.01'):
+                    move_toward = Decimal(str(random.uniform(0, max_shift * 0.5)))
+                    new_x -= (old_x / dist_from_center) * move_toward
+                    new_y -= (old_y / dist_from_center) * move_toward
+            else:
+                new_x += Decimal(str(random.uniform(-max_shift, max_shift)))
+                new_y += Decimal(str(random.uniform(-max_shift, max_shift)))
         
-        if perturbation_type in ['rotate', 'both']:
-            max_rotation = 10.0 * (1.0 - progress * 0.5)
+        if perturbation_type == 'rotate':
+            max_rotation = 20.0 * (1.0 - progress * 0.5)
             new_angle = (old_angle + Decimal(str(random.uniform(-max_rotation, max_rotation)))) % Decimal('360')
+        elif perturbation_type == 'both':
+            max_rotation = 15.0 * (1.0 - progress * 0.5)
+            new_angle = (old_angle + Decimal(str(random.uniform(-max_rotation, max_rotation)))) % Decimal('360')
+        elif perturbation_type == 'big_rotate':
+            # Try a major rotation (45, 90, 135, 180 degrees etc.)
+            big_angles = [45, 90, 135, 180, 225, 270, 315]
+            new_angle = (old_angle + Decimal(str(random.choice(big_angles)))) % Decimal('360')
         
         # Create new tree with perturbed position/angle
         new_tree = ChristmasTree(
@@ -432,12 +433,12 @@ def simulated_annealing_improvement(placed_trees, initial_temp=50.0, cooling_rat
     return best_trees
 
 
-def initialize_trees(num_trees, existing_trees=None, use_sa=True, sa_iterations=300):
+def initialize_trees(num_trees, existing_trees=None, use_sa=True, sa_iterations=400):
     """
-    Hybrid Pipeline: Sliding-based BLF Construction + Simulated Annealing Improvement
+    Hybrid Pipeline: Rotation-optimized BLF Construction + Simulated Annealing Improvement
     
-    Phase 1 (Construction): Uses sliding-based placement with ~200 candidate positions
-    per tree to generate a valid starting layout.
+    Phase 1 (Construction): For each tree, tries multiple rotation angles and finds
+    the best (rotation, position) combination that minimizes the bounding box.
     
     Phase 2 (Improvement): Uses Simulated Annealing to refine the layout and escape
     local optima.
@@ -454,26 +455,53 @@ def initialize_trees(num_trees, existing_trees=None, use_sa=True, sa_iterations=
     num_to_add = num_trees - len(placed_trees)
 
     if num_to_add > 0:
-        # Phase 1: Construction using sliding-based BLF
-        # Generate random angles for new trees
-        angles = [random.uniform(0, 360) for _ in range(num_to_add)]
+        # Phase 1: Construction with rotation optimization
         
         if not placed_trees:
-            # Place first tree at origin
-            placed_trees.append(ChristmasTree(angle=str(angles.pop(0))))
-
-        for angle in angles:
-            # Create a template tree at origin with this angle for candidate generation
-            template_tree = ChristmasTree(angle=str(angle))
+            # First tree: try a few rotations to start with best orientation
+            # For first tree alone, rotation doesn't matter much, place at origin
+            placed_trees.append(ChristmasTree(angle='0'))
+            num_to_add -= 1
+        
+        # Second tree: try interlocking configurations (tips toward each other)
+        if num_to_add > 0 and len(placed_trees) == 1:
+            best_score = Decimal('Infinity')
+            best_tree = None
             
-            # Find best position using sliding-based BLF (~200 positions)
-            px, py = blf_placement_with_nfp(
-                template_tree,
+            # Try specific angles that encourage interlocking
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                template = ChristmasTree(angle=str(angle))
+                # Try positions close to the first tree
+                for px_offset in [Decimal('0.6'), Decimal('0.7'), Decimal('0.8')]:
+                    for py_offset in [Decimal('-0.3'), Decimal('0'), Decimal('0.3')]:
+                        test_tree = ChristmasTree(
+                            center_x=str(px_offset),
+                            center_y=str(py_offset),
+                            angle=str(angle)
+                        )
+                        if not check_collision(test_tree.polygon, placed_trees[0].polygon):
+                            score = compute_bounding_box_with_new_tree(placed_trees, test_tree.polygon)
+                            if score < best_score:
+                                best_score = score
+                                best_tree = test_tree
+            
+            if best_tree:
+                placed_trees.append(best_tree)
+            else:
+                # Fallback
+                px, py, angle = find_best_rotation_and_position(placed_trees, 24, 48)
+                placed_trees.append(ChristmasTree(center_x=str(px), center_y=str(py), angle=str(angle)))
+            num_to_add -= 1
+        
+        # Remaining trees: use full rotation optimization
+        for _ in range(num_to_add):
+            # Try many rotation angles and find the best placement
+            px, py, angle = find_best_rotation_and_position(
                 placed_trees,
-                num_positions=200
+                num_rotation_angles=36,  # Every 10 degrees
+                num_direction_angles=72  # Every 5 degrees
             )
             
-            # Create the final tree at the chosen position
             placed_tree = ChristmasTree(
                 center_x=str(px),
                 center_y=str(py),
@@ -488,10 +516,10 @@ def initialize_trees(num_trees, existing_trees=None, use_sa=True, sa_iterations=
     if use_sa and len(placed_trees) > 2:
         placed_trees = simulated_annealing_improvement(
             placed_trees,
-            initial_temp=30.0,
-            cooling_rate=0.95,
+            initial_temp=40.0,
+            cooling_rate=0.97,
             iterations=sa_iterations,
-            num_trees_to_optimize=min(len(placed_trees), 20)
+            num_trees_to_optimize=min(len(placed_trees), 25)
         )
         
         # Final validation

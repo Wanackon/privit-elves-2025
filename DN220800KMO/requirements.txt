@@ -1,3 +1,8 @@
 pandas==2.3.0
 shapely>=2.0.0
 numpy>=1.24.0
+# Numba JIT compilation for 10-15x speedup on collision detection
+numba>=0.58.0
+# PyTorch with MPS (Metal) support for macOS GPU acceleration
+# Install with: pip install torch torchvision torchaudio
+torch>=2.0.0
